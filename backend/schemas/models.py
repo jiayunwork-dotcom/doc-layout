@@ -145,3 +145,92 @@ class TaskInfo(BaseModel):
 class TaskListResponse(BaseModel):
     tasks: List[TaskInfo]
     total: int
+
+
+class DiffType(str, Enum):
+    ADDED = "added"
+    REMOVED = "removed"
+    MOVED = "moved"
+    MODIFIED = "modified"
+    UNCHANGED = "unchanged"
+
+
+class DisplacementVector(BaseModel):
+    dx: float
+    dy: float
+
+
+class DiffRecord(BaseModel):
+    id: str
+    type: DiffType
+    page_number: int
+    source_region_id: Optional[str] = None
+    target_region_id: Optional[str] = None
+    source_region: Optional[Region] = None
+    target_region: Optional[Region] = None
+    displacement: Optional[DisplacementVector] = None
+    content_summary: Optional[str] = None
+    iou: Optional[float] = None
+
+
+class PageDiff(BaseModel):
+    page_number: int
+    source_width: int
+    source_height: int
+    target_width: int
+    target_height: int
+    diffs: List[DiffRecord] = Field(default_factory=list)
+
+
+class ComparisonStats(BaseModel):
+    added: int = 0
+    removed: int = 0
+    moved: int = 0
+    modified: int = 0
+    unchanged: int = 0
+    total: int = 0
+
+
+class TaskBasicInfo(BaseModel):
+    task_id: str
+    filename: str
+    page_count: int
+
+
+class ComparisonStatus(str, Enum):
+    PENDING = "pending"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class ComparisonInfo(BaseModel):
+    comparison_id: str
+    status: ComparisonStatus
+    source_id: str
+    target_id: str
+    page_number: Optional[int] = None
+    created_at: str
+    updated_at: str
+    progress: float = 0.0
+    message: Optional[str] = None
+    error: Optional[str] = None
+
+
+class ComparisonResult(BaseModel):
+    comparison_id: str
+    status: ComparisonStatus
+    source_info: TaskBasicInfo
+    target_info: TaskBasicInfo
+    page_diffs: List[PageDiff] = Field(default_factory=list)
+    stats: ComparisonStats = Field(default_factory=ComparisonStats)
+    error: Optional[str] = None
+
+
+class ComparisonExport(BaseModel):
+    comparison_id: str
+    source_info: TaskBasicInfo
+    target_info: TaskBasicInfo
+    page_diffs: List[PageDiff]
+    stats: ComparisonStats
+    created_at: str

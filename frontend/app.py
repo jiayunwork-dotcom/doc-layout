@@ -113,6 +113,188 @@ def delete_task(task_id):
         return False
 
 
+def create_comparison(source_id, target_id, page_number=None):
+    payload = {"source_id": source_id, "target_id": target_id}
+    if page_number is not None:
+        payload["page_number"] = page_number
+    try:
+        response = requests.post(f"{API_URL}/compare", json=payload, timeout=30)
+        return response.json() if response.status_code == 202 else None
+    except Exception as e:
+        st.error(f"创建比对失败: {e}")
+        return None
+
+
+def get_comparison_status(comparison_id):
+    try:
+        response = requests.get(f"{API_URL}/comparisons/{comparison_id}", timeout=10)
+        return response.json() if response.status_code == 200 else None
+    except:
+        return None
+
+
+def list_comparisons():
+    try:
+        response = requests.get(f"{API_URL}/comparisons", timeout=10)
+        return response.json() if response.status_code == 200 else None
+    except:
+        return None
+
+
+def export_comparison(comparison_id):
+    try:
+        response = requests.get(f"{API_URL}/comparisons/{comparison_id}/export", timeout=30)
+        return response if response.status_code == 200 else None
+    except:
+        return None
+
+
+DIFF_TYPE_COLORS = {
+    "added": (34, 197, 94),
+    "removed": (239, 68, 68),
+    "moved": (234, 179, 8),
+    "modified": (168, 85, 247),
+    "unchanged": (107, 114, 128),
+}
+
+DIFF_TYPE_NAMES = {
+    "added": "新增",
+    "removed": "删除",
+    "moved": "移动",
+    "modified": "修改",
+    "unchanged": "未变化",
+}
+
+
+def draw_diff_regions_on_image(image, diffs, side="source", show_unchanged=True):
+    from PIL import ImageDraw, ImageFont
+
+    img = image.copy().convert("RGBA")
+    w, h = img.size
+
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    try:
+        font = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 14)
+    except:
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", 14)
+        except:
+            font = ImageFont.load_default()
+
+    for diff in diffs:
+        diff_type = diff["type"]
+
+        if diff_type == "unchanged" and not show_unchanged:
+            continue
+
+        if side == "source":
+            region = diff.get("source_region")
+        else:
+            region = diff.get("target_region")
+
+        if not region:
+            continue
+
+        bbox = region["bbox"]
+        color = DIFF_TYPE_COLORS.get(diff_type, (128, 128, 128))
+
+        x1 = int(bbox["x"] * w)
+        y1 = int(bbox["y"] * h)
+        x2 = int((bbox["x"] + bbox["width"]) * w)
+        y2 = int((bbox["y"] + bbox["height"]) * h)
+
+        if diff_type == "unchanged":
+            alpha = 40
+        else:
+            alpha = 100
+
+        fill_color = (color[0], color[1], color[2], alpha)
+        draw.rectangle([x1, y1, x2, y2], fill=fill_color)
+
+        line_width = 2 if diff_type == "unchanged" else 3
+        outline_color = (color[0], color[1], color[2], 255)
+        draw.rectangle([x1, y1, x2, y2], outline=outline_color, width=line_width)
+
+        label = DIFF_TYPE_NAMES.get(diff_type, diff_type)
+        try:
+            text_bbox = draw.textbbox((0, 0), label, font=font)
+            text_w = text_bbox[2] - text_bbox[0]
+            text_h = text_bbox[3] - text_bbox[1]
+        except:
+            text_w, text_h = len(label) * 8, 16
+
+        label_y = y1 - text_h - 10
+        if label_y < 0:
+            label_y = y1 + 5
+
+        draw.rectangle(
+            [x1, label_y, x1 + text_w + 10, label_y + text_h + 8],
+            fill=outline_color
+        )
+        draw.text((x1 + 5, label_y + 3), label, fill=(255, 255, 255, 255), font=font)
+
+    result = Image.alpha_composite(img, overlay)
+    return result.convert("RGB")
+
+
+def draw_moved_connections(source_image, target_image, diffs):
+    from PIL import ImageDraw
+
+    src_img = source_image.copy().convert("RGBA")
+    tgt_img = target_image.copy().convert("RGBA")
+    src_w, src_h = src_img.size
+    tgt_w, tgt_h = tgt_img.size
+
+    total_width = src_w + tgt_w
+    total_height = max(src_h, tgt_h)
+
+    combined = Image.new("RGBA", (total_width, total_height), (255, 255, 255, 255))
+    combined.paste(src_img, (0, 0))
+    combined.paste(tgt_img, (src_w, 0))
+
+    draw = ImageDraw.Draw(combined)
+
+    for diff in diffs:
+        if diff["type"] != "moved":
+            continue
+
+        src_region = diff.get("source_region")
+        tgt_region = diff.get("target_region")
+
+        if not src_region or not tgt_region:
+            continue
+
+        src_bbox = src_region["bbox"]
+        tgt_bbox = tgt_region["bbox"]
+
+        src_center_x = int((src_bbox["x"] + src_bbox["width"] / 2) * src_w)
+        src_center_y = int((src_bbox["y"] + src_bbox["height"] / 2) * src_h)
+
+        tgt_center_x = int((tgt_bbox["x"] + tgt_bbox["width"] / 2) * tgt_w) + src_w
+        tgt_center_y = int((tgt_bbox["y"] + tgt_bbox["height"] / 2) * tgt_h)
+
+        color = DIFF_TYPE_COLORS["moved"]
+        draw.line(
+            [(src_center_x, src_center_y), (tgt_center_x, tgt_center_y)],
+            fill=(color[0], color[1], color[2], 200),
+            width=2,
+            joint="curve"
+        )
+
+        for i in range(0, int(((tgt_center_x - src_center_x) ** 2 + (tgt_center_y - src_center_y) ** 2) ** 0.5), 15):
+            t = i / int(((tgt_center_x - src_center_x) ** 2 + (tgt_center_y - src_center_y) ** 2) ** 0.5)
+            dash_x = src_center_x + t * (tgt_center_x - src_center_x)
+            dash_y = src_center_y + t * (tgt_center_y - src_center_y)
+            draw.ellipse(
+                [dash_x - 2, dash_y - 2, dash_x + 2, dash_y + 2],
+                fill=(color[0], color[1], color[2], 255)
+            )
+
+    return combined.convert("RGB")
+
+
 def draw_regions_on_image(image, regions, selected_region_id=None, page_width=None, page_height=None):
     from PIL import ImageDraw, ImageFont
     import math
@@ -304,7 +486,7 @@ with st.sidebar:
         st.info("暂无历史任务")
 
 
-tab1, tab2, tab3 = st.tabs(["📤 上传文档", "🔍 分析结果", "ℹ️ 使用说明"])
+tab1, tab2, tab3, tab4 = st.tabs(["📤 上传文档", "🔍 分析结果", "📊 版面比对", "ℹ️ 使用说明"])
 
 with tab1:
     st.header("上传文档进行分析")
@@ -509,6 +691,305 @@ with tab2:
                 st.error(f"分析失败: {task_data.get('error', '未知错误')}")
 
 with tab3:
+    st.header("📊 版面比对")
+    st.markdown("对同一份文档的两个版本进行区域级差异分析，标记新增、删除、移动和修改的区域")
+
+    st.divider()
+
+    completed_tasks = []
+    tasks_data = list_tasks()
+    if tasks_data and tasks_data.get("tasks"):
+        completed_tasks = [
+            t for t in tasks_data["tasks"]
+            if t["status"] == "completed"
+        ]
+
+    if not completed_tasks:
+        st.info("暂无已完成的分析任务，请先上传并分析文档")
+    else:
+        task_options = {
+            f"{t['metadata']['filename']} ({t['task_id'][:8]}...)": t["task_id"]
+            for t in completed_tasks
+        }
+
+        col1, col2 = st.columns(2)
+        with col1:
+            source_task_label = st.selectbox(
+                "选择源版本 (Source)",
+                list(task_options.keys()),
+                key="source_task_select",
+                format_func=lambda x: x
+            )
+            source_id = task_options[source_task_label]
+
+        with col2:
+            target_task_label = st.selectbox(
+                "选择目标版本 (Target)",
+                list(task_options.keys()),
+                key="target_task_select",
+                format_func=lambda x: x,
+                index=min(1, len(task_options) - 1) if len(task_options) > 1 else 0
+            )
+            target_id = task_options[target_task_label]
+
+        page_col1, page_col2, page_col3 = st.columns([1, 1, 2])
+        with page_col1:
+            compare_all_pages = st.toggle("比对所有页面", value=True)
+        with page_col2:
+            if not compare_all_pages:
+                source_task_data = get_task_status(source_id)
+                max_page = 1
+                if source_task_data and source_task_data.get("result"):
+                    max_page = len(source_task_data["result"].get("pages", [1]))
+                page_number = st.number_input("指定页码", min_value=1, max_value=max_page, value=1)
+            else:
+                page_number = None
+
+        with st.sidebar:
+            st.divider()
+            st.header("📊 比对任务列表")
+            comp_data = list_comparisons()
+            if comp_data and comp_data.get("comparisons"):
+                comps = comp_data["comparisons"]
+                st.info(f"共 {comp_data['total']} 个比对任务")
+
+                for comp in reversed(comps[-10:]):
+                    status_emoji = {
+                        "pending": "⏳",
+                        "processing": "⚙️",
+                        "completed": "✅",
+                        "failed": "❌",
+                    }.get(comp["status"], "❓")
+
+                    with st.expander(f"{status_emoji} {comp['comparison_id'][:8]}..."):
+                        st.write(f"**状态**: {comp['status']}")
+                        st.write(f"**源**: {comp['source_id'][:8]}...")
+                        st.write(f"**目标**: {comp['target_id'][:8]}...")
+                        st.write(f"**进度**: {comp['progress']*100:.0f}%")
+                        if comp.get("message"):
+                            st.caption(comp["message"])
+                        st.write(f"**创建时间**: {comp['created_at']}")
+
+                        if st.button("查看", key=f"view_comp_{comp['comparison_id']}"):
+                            st.session_state["current_comparison_id"] = comp["comparison_id"]
+            else:
+                st.info("暂无比对任务")
+
+        compare_btn = st.button(
+            "🚀 开始比对",
+            type="primary",
+            disabled=source_id == target_id,
+            use_container_width=True
+        )
+
+        if source_id == target_id:
+            st.warning("请选择两个不同的任务进行比对")
+
+        if compare_btn and source_id != target_id:
+            with st.status("正在创建比对任务...", expanded=True) as status:
+                result = create_comparison(source_id, target_id, page_number)
+                if result and result.get("comparison_id"):
+                    comparison_id = result["comparison_id"]
+                    st.session_state["current_comparison_id"] = comparison_id
+                    status.update(label=f"✅ 比对任务已创建: {comparison_id}", state="complete")
+                    st.success(result["message"])
+                    st.rerun()
+                else:
+                    status.update(label="❌ 创建比对任务失败", state="error")
+
+        comparison_id = st.session_state.get("current_comparison_id", "")
+        if not comparison_id:
+            comparison_id = st.text_input(
+                "或输入比对ID",
+                value="",
+                placeholder="输入比对ID或从侧边栏选择"
+            )
+
+        if comparison_id:
+            comp_data = get_comparison_status(comparison_id)
+
+            if not comp_data:
+                st.error("比对任务不存在")
+            else:
+                status = comp_data["status"]
+                progress = comp_data["progress"]
+
+                st.subheader(f"比对状态: {status}")
+                progress_bar = st.progress(progress)
+                if comp_data.get("message"):
+                    st.caption(comp_data["message"])
+
+                if status == "pending":
+                    st.info("比对任务排队中，请等待...")
+                    time.sleep(2)
+                    st.rerun()
+
+                elif status == "processing":
+                    st.info("比对进行中，正在刷新状态...")
+                    time.sleep(2)
+                    st.rerun()
+
+                elif status == "completed" and comp_data.get("result"):
+                    result = comp_data["result"]
+                    page_diffs = result.get("page_diffs", [])
+                    stats = result.get("stats", {})
+
+                    st.divider()
+                    st.markdown("### 📈 差异统计")
+
+                    stat_col1, stat_col2, stat_col3, stat_col4, stat_col5, stat_col6 = st.columns(6)
+                    with stat_col1:
+                        st.metric("新增", stats.get("added", 0))
+                    with stat_col2:
+                        st.metric("删除", stats.get("removed", 0))
+                    with stat_col3:
+                        st.metric("移动", stats.get("moved", 0))
+                    with stat_col4:
+                        st.metric("修改", stats.get("modified", 0))
+                    with stat_col5:
+                        st.metric("未变化", stats.get("unchanged", 0))
+                    with stat_col6:
+                        st.metric("总计", stats.get("total", 0))
+
+                    st.divider()
+
+                    if not page_diffs:
+                        st.warning("没有比对结果")
+                    else:
+                        total_pages = len(page_diffs)
+                        page_num = st.slider("选择页码", 1, total_pages, 1, key="compare_page_slider")
+
+                        page_diff = page_diffs[page_num - 1]
+                        diffs = page_diff.get("diffs", [])
+
+                        show_unchanged = not st.toggle("仅显示差异区域", value=False, key="show_diff_only")
+
+                        diff_type_filter = st.multiselect(
+                            "筛选差异类型",
+                            ["added", "removed", "moved", "modified", "unchanged"],
+                            default=["added", "removed", "moved", "modified"] if not show_unchanged else ["added", "removed", "moved", "modified", "unchanged"],
+                            format_func=lambda x: DIFF_TYPE_NAMES.get(x, x)
+                        )
+
+                        filtered_diffs = [d for d in diffs if d["type"] in diff_type_filter]
+
+                        source_image = get_page_image(source_id, page_num)
+                        target_image = get_page_image(target_id, page_num)
+
+                        if source_image and target_image:
+                            source_annotated = draw_diff_regions_on_image(
+                                source_image, filtered_diffs, side="source", show_unchanged=show_unchanged
+                            )
+                            target_annotated = draw_diff_regions_on_image(
+                                target_image, filtered_diffs, side="target", show_unchanged=show_unchanged
+                            )
+
+                            img_col1, img_col2 = st.columns(2)
+                            with img_col1:
+                                st.markdown(f"**源版本 (Source)** - 第 {page_num} 页")
+                                st.caption(f"红色框=删除区域, 黄色框=移动区域")
+                                st.image(source_annotated, use_container_width=True)
+
+                            with img_col2:
+                                st.markdown(f"**目标版本 (Target)** - 第 {page_num} 页")
+                                st.caption(f"绿色框=新增区域, 黄色框=移动区域")
+                                st.image(target_annotated, use_container_width=True)
+
+                            if any(d["type"] == "moved" for d in filtered_diffs):
+                                st.divider()
+                                st.markdown("### 🔄 移动区域连接示意")
+                                st.caption("虚线连接移动区域的旧位置和新位置")
+                                moved_diffs = [d for d in filtered_diffs if d["type"] == "moved"]
+                                combined_img = draw_moved_connections(source_image, target_image, moved_diffs)
+                                st.image(combined_img, use_container_width=True)
+
+                        st.divider()
+                        st.markdown("### 📋 差异详情列表")
+
+                        type_order = {"added": 0, "removed": 1, "moved": 2, "modified": 3, "unchanged": 4}
+                        sorted_diffs = sorted(filtered_diffs, key=lambda d: type_order.get(d["type"], 99))
+
+                        for idx, diff in enumerate(sorted_diffs):
+                            diff_type = diff["type"]
+                            color = DIFF_TYPE_COLORS.get(diff_type, (128, 128, 128))
+                            color_hex = f"#{color[0]:02x}{color[1]:02x}{color[2]:02x}"
+
+                            with st.expander(
+                                f"{idx + 1}. [{DIFF_TYPE_NAMES.get(diff_type, diff_type)}] "
+                                f"区域: {diff.get('source_region_id') or diff.get('target_region_id', 'N/A')[:8]}...",
+                                expanded=diff_type != "unchanged"
+                            ):
+                                st.markdown(
+                                    f"<div style='background-color:{color_hex}20;padding:10px;border-radius:5px;"
+                                    f"border-left:4px solid {color_hex}'>"
+                                    f"<strong>差异类型:</strong> {DIFF_TYPE_NAMES.get(diff_type, diff_type)}"
+                                    f"</div>",
+                                    unsafe_allow_html=True
+                                )
+
+                                detail_col1, detail_col2 = st.columns(2)
+                                with detail_col1:
+                                    st.write(f"**页码**: {diff['page_number']}")
+                                    if diff.get("source_region_id"):
+                                        st.write(f"**源区域ID**: {diff['source_region_id']}")
+                                    if diff.get("target_region_id"):
+                                        st.write(f"**目标区域ID**: {diff['target_region_id']}")
+                                    if diff.get("iou") is not None:
+                                        st.write(f"**IoU匹配度**: {diff['iou']:.4f}")
+
+                                with detail_col2:
+                                    if diff.get("source_region"):
+                                        src_region = diff["source_region"]
+                                        st.write(f"**源区域类型**: {REGION_NAMES.get(src_region['type'], src_region['type'])}")
+                                        bbox = src_region["bbox"]
+                                        st.write(f"**源位置**: x={bbox['x']:.4f}, y={bbox['y']:.4f}, w={bbox['width']:.4f}, h={bbox['height']:.4f}")
+                                    if diff.get("target_region"):
+                                        tgt_region = diff["target_region"]
+                                        st.write(f"**目标区域类型**: {REGION_NAMES.get(tgt_region['type'], tgt_region['type'])}")
+                                        bbox = tgt_region["bbox"]
+                                        st.write(f"**目标位置**: x={bbox['x']:.4f}, y={bbox['y']:.4f}, w={bbox['width']:.4f}, h={bbox['height']:.4f}")
+
+                                if diff.get("displacement"):
+                                    disp = diff["displacement"]
+                                    st.info(
+                                        f"**位移向量**: dx={disp['dx']:.4f}, dy={disp['dy']:.4f} "
+                                        f"(水平偏移: {disp['dx']*100:.1f}%, 垂直偏移: {disp['dy']*100:.1f}%)"
+                                    )
+
+                                if diff.get("content_summary"):
+                                    st.markdown("#### 📝 内容变化摘要")
+                                    st.info(diff["content_summary"])
+
+                                    if diff.get("source_region") and diff["source_region"].get("text"):
+                                        with st.expander("查看源文本"):
+                                            st.text(diff["source_region"]["text"])
+                                    if diff.get("target_region") and diff["target_region"].get("text"):
+                                        with st.expander("查看目标文本"):
+                                            st.text(diff["target_region"]["text"])
+
+                        st.divider()
+                        st.markdown("### 📁 导出比对结果")
+
+                        export_col1, export_col2 = st.columns(2)
+                        with export_col1:
+                            if st.button("📄 导出 JSON 报告", use_container_width=True):
+                                export_resp = export_comparison(comparison_id)
+                                if export_resp:
+                                    st.download_button(
+                                        "⬇️ 下载 JSON 报告",
+                                        export_resp.content,
+                                        file_name=f"comparison_{comparison_id[:8]}.json",
+                                        mime="application/json"
+                                    )
+
+                        with export_col2:
+                            if st.button("👁️ 预览 JSON 数据", use_container_width=True):
+                                st.json(result)
+
+                elif status == "failed":
+                    st.error(f"比对失败: {comp_data.get('error', '未知错误')}")
+
+with tab4:
     st.header("使用说明")
 
     st.markdown("""
@@ -541,11 +1022,18 @@ with tab3:
 
     ### 📡 API接口
 
+    **文档分析接口:**
     - `POST /analyze` - 上传文档进行分析（异步）
     - `GET /tasks/{id}` - 查询任务状态和结果
     - `GET /tasks/{id}/pages/{page}` - 获取单页详细结果
     - `GET /tasks/{id}/export?format=json|hocr|alto` - 导出分析结果
     - `DELETE /tasks/{id}` - 删除任务
+
+    **版面比对接口:**
+    - `POST /compare` - 创建比对任务（异步），请求体: `{source_id, target_id, page_number?}`
+    - `GET /comparisons` - 列出所有比对任务
+    - `GET /comparisons/{id}` - 查询比对状态和结果
+    - `GET /comparisons/{id}/export` - 导出结构化差异报告（JSON）
 
     ---
 
@@ -561,6 +1049,7 @@ with tab3:
     ### 🎨 区域颜色说明
     """)
 
+    st.markdown("**区域类型颜色:**")
     color_cols = st.columns(4)
     for i, (rtype, color) in enumerate(REGION_COLORS.items()):
         with color_cols[i % 4]:
@@ -568,6 +1057,18 @@ with tab3:
             st.markdown(
                 f"<div style='background-color:{color_hex};padding:10px;border-radius:5px;color:black'>"
                 f"{REGION_NAMES.get(rtype, rtype)}</div>",
+                unsafe_allow_html=True
+            )
+
+    st.divider()
+    st.markdown("**差异类型颜色 (版面比对):**")
+    diff_color_cols = st.columns(5)
+    for i, (dtype, color) in enumerate(DIFF_TYPE_COLORS.items()):
+        with diff_color_cols[i % 5]:
+            color_hex = f"#{color[0]:02x}{color[1]:02x}{color[2]:02x}"
+            st.markdown(
+                f"<div style='background-color:{color_hex};padding:10px;border-radius:5px;color:white'>"
+                f"{DIFF_TYPE_NAMES.get(dtype, dtype)}</div>",
                 unsafe_allow_html=True
             )
 

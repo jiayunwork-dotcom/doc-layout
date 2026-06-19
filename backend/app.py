@@ -9,7 +9,8 @@ import json
 
 from config import Config
 from core.task_manager import TaskManager
-from schemas.models import TaskStatus
+from core.comparison_manager import ComparisonManager
+from schemas.models import TaskStatus, ComparisonStatus, ComparisonExport
 
 app = Flask(__name__)
 app.config.from_object(Config)
@@ -20,6 +21,8 @@ os.makedirs(Config.RESULTS_FOLDER, exist_ok=True)
 os.makedirs(Config.MODELS_FOLDER, exist_ok=True)
 
 task_manager = TaskManager()
+comparison_manager = ComparisonManager()
+comparison_manager.set_task_manager(task_manager)
 
 
 @app.route("/health", methods=["GET"])
@@ -202,6 +205,125 @@ def too_large(e):
 @app.errorhandler(500)
 def internal_error(e):
     return jsonify({"error": "Internal server error"}), 500
+
+
+@app.route("/compare", methods=["POST"])
+def create_comparison():
+    data = request.get_json()
+    if not data:
+        return jsonify({"error": "Request body is required"}), 400
+
+    source_id = data.get("source_id")
+    target_id = data.get("target_id")
+    page_number = data.get("page_number")
+
+    if not source_id or not target_id:
+        return jsonify({"error": "source_id and target_id are required"}), 400
+
+    if page_number is not None:
+        try:
+            page_number = int(page_number)
+            if page_number < 1:
+                return jsonify({"error": "page_number must be a positive integer"}), 400
+        except (ValueError, TypeError):
+            return jsonify({"error": "page_number must be a valid integer"}), 400
+
+    try:
+        comparison_id = comparison_manager.create_comparison(
+            source_id=source_id,
+            target_id=target_id,
+            page_number=page_number,
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"Failed to create comparison: {str(e)}"}), 500
+
+    return jsonify({
+        "comparison_id": comparison_id,
+        "message": "Comparison task queued successfully",
+    }), 202
+
+
+@app.route("/comparisons", methods=["GET"])
+def list_comparisons():
+    comparisons = comparison_manager.list_comparisons()
+    return jsonify({
+        "comparisons": [c.model_dump() for c in comparisons],
+        "total": len(comparisons),
+    })
+
+
+@app.route("/comparisons/<comparison_id>", methods=["GET"])
+def get_comparison(comparison_id):
+    comparison_info = comparison_manager.get_comparison(comparison_id)
+    if not comparison_info:
+        return jsonify({"error": f"Comparison {comparison_id} not found"}), 404
+
+    result = comparison_manager.get_result(comparison_id)
+
+    response = comparison_info.model_dump()
+
+    if result and comparison_info.status == ComparisonStatus.COMPLETED:
+        result_dict = result.model_dump()
+
+        for page_diff in result_dict.get("page_diffs", []):
+            for diff in page_diff.get("diffs", []):
+                if diff.get("source_region"):
+                    region = diff["source_region"]
+                    region["type"] = region["type"] if isinstance(region["type"], str) else region["type"].value
+                if diff.get("target_region"):
+                    region = diff["target_region"]
+                    region["type"] = region["type"] if isinstance(region["type"], str) else region["type"].value
+
+        response["result"] = result_dict
+
+    return jsonify(response)
+
+
+@app.route("/comparisons/<comparison_id>/export", methods=["GET"])
+def export_comparison(comparison_id):
+    comparison_info = comparison_manager.get_comparison(comparison_id)
+    if not comparison_info:
+        return jsonify({"error": f"Comparison {comparison_id} not found"}), 404
+
+    if comparison_info.status != ComparisonStatus.COMPLETED:
+        return jsonify({
+            "error": f"Comparison not yet completed. Current status: {comparison_info.status}"
+        }), 400
+
+    result = comparison_manager.get_result(comparison_id)
+    if not result:
+        return jsonify({"error": "Comparison result not found"}), 404
+
+    export_data = ComparisonExport(
+        comparison_id=comparison_id,
+        source_info=result.source_info,
+        target_info=result.target_info,
+        page_diffs=result.page_diffs,
+        stats=result.stats,
+        created_at=comparison_info.created_at,
+    )
+
+    export_dict = export_data.model_dump()
+
+    for page_diff in export_dict.get("page_diffs", []):
+        for diff in page_diff.get("diffs", []):
+            if diff.get("source_region"):
+                region = diff["source_region"]
+                region["type"] = region["type"] if isinstance(region["type"], str) else region["type"].value
+            if diff.get("target_region"):
+                region = diff["target_region"]
+                region["type"] = region["type"] if isinstance(region["type"], str) else region["type"].value
+            diff["type"] = diff["type"] if isinstance(diff["type"], str) else diff["type"].value
+
+    return app.response_class(
+        response=json.dumps(export_dict, ensure_ascii=False, indent=2),
+        mimetype="application/json",
+        headers={
+            "Content-Disposition": f"attachment; filename=comparison_{comparison_id[:8]}.json"
+        }
+    )
 
 
 if __name__ == "__main__":
