@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: doc-layout-backend
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./backend/data/uploads:/app/data/uploads
+      - ./backend/data/results:/app/data/results
+      - ./backend/data/models:/app/data/models
+    environment:
+      - FLASK_ENV=production
+      - MAX_CONTENT_LENGTH=52428800
+      - BATCH_SIZE=10
+      - MODEL_PATH=/app/data/models/layout_model.onnx
+      - OCR_ENABLED=true
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: doc-layout-frontend
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
+    environment:
+      - API_URL=http://backend:5000
+    restart: unless-stopped
+
+volumes:
+  uploads:
+  results:
+  models:
