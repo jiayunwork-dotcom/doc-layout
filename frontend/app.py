@@ -252,6 +252,17 @@ with st.sidebar:
     output_format = st.selectbox("输出格式", ["json", "hocr", "alto"], index=0)
 
     st.divider()
+    st.header("🎯 置信度过滤")
+    min_confidence = st.slider(
+        "最低置信度",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.5,
+        step=0.05,
+        help="只显示置信度大于等于此阈值的区域"
+    )
+
+    st.divider()
     st.header("📋 任务列表")
 
     tasks_data = list_tasks()
@@ -379,9 +390,15 @@ with tab2:
                                 key=lambda r: r.get("reading_order", 999)
                             )
 
+                            total_region_count = len(sorted_regions)
+                            confidence_filtered_regions = [
+                                r for r in sorted_regions
+                                if r.get("confidence", 0) >= min_confidence
+                            ]
+
                             selected_region_id = st.session_state.get("selected_region_id")
                             annotated_image = draw_regions_on_image(
-                                page_image, sorted_regions, selected_region_id
+                                page_image, confidence_filtered_regions, selected_region_id
                             )
 
                             st.image(annotated_image, caption=f"第 {page_num} 页 / 共 {total_pages} 页",
@@ -401,10 +418,10 @@ with tab2:
                         )
 
                         filtered_regions = [
-                            r for r in sorted_regions if r["type"] in type_filter
+                            r for r in confidence_filtered_regions if r["type"] in type_filter
                         ]
 
-                        st.info(f"显示 {len(filtered_regions)} / {len(regions)} 个区域")
+                        st.info(f"显示 {len(filtered_regions)}/{total_region_count} 个区域")
 
                         for idx, region in enumerate(filtered_regions):
                             rtype = region["type"]
@@ -425,7 +442,7 @@ with tab2:
 
                         if st.session_state.get("selected_region_id"):
                             selected_region = next(
-                                (r for r in regions if r["id"] == st.session_state["selected_region_id"]),
+                                (r for r in sorted_regions if r["id"] == st.session_state["selected_region_id"]),
                                 None
                             )
                             if selected_region:

@@ -1,5 +1,6 @@
 import json
 from typing import Dict, Any
+from collections import Counter
 from schemas.models import AnalysisResult
 
 
@@ -7,6 +8,29 @@ class JSONExporter:
     @staticmethod
     def export(result: AnalysisResult) -> str:
         return json.dumps(JSONExporter.to_dict(result), indent=2, ensure_ascii=False)
+
+    @staticmethod
+    def _compute_page_statistics(page) -> Dict[str, Any]:
+        regions = page.regions
+        if not regions:
+            return {
+                "total_regions": 0,
+                "type_counts": {},
+                "avg_confidence": 0.0,
+                "max_confidence": 0.0,
+                "min_confidence": 0.0,
+            }
+
+        type_counts = Counter(r.type.value for r in regions)
+        confidences = [r.confidence for r in regions]
+
+        return {
+            "total_regions": len(regions),
+            "type_counts": dict(type_counts),
+            "avg_confidence": round(sum(confidences) / len(confidences), 4),
+            "max_confidence": round(max(confidences), 4),
+            "min_confidence": round(min(confidences), 4),
+        }
 
     @staticmethod
     def to_dict(result: AnalysisResult) -> Dict[str, Any]:
@@ -22,6 +46,7 @@ class JSONExporter:
                     "dpi": page.dpi,
                     "image_path": page.image_path,
                     "preprocessing_applied": page.preprocessing_applied,
+                    "statistics": JSONExporter._compute_page_statistics(page),
                     "regions": [
                         {
                             "id": region.id,

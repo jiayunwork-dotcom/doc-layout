@@ -69,6 +69,14 @@ class Region(BaseModel):
     children: List[str] = Field(default_factory=list)
 
 
+class PageStatistics(BaseModel):
+    total_regions: int
+    type_counts: Dict[str, int]
+    avg_confidence: float
+    max_confidence: float
+    min_confidence: float
+
+
 class Page(BaseModel):
     page_number: int
     width: int

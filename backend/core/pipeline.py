@@ -15,6 +15,7 @@ from processing.preprocessor import DocumentPreprocessor
 from processing.ocr_engine import OCREngine
 from processing.reading_order import ReadingOrderInference
 from processing.hierarchy import HierarchyExtractor
+from processing.region_merger import merge_adjacent_regions
 from models.layout_detector import LayoutDetector
 from models.table_recognizer import TableRecognizer
 from output.json_exporter import JSONExporter
@@ -93,7 +94,7 @@ class AnalysisPipeline:
             all_regions = self.layout_detector.detect_batch(images)
 
             for page, regions in zip(pages, all_regions):
-                page.regions = regions
+                page.regions = merge_adjacent_regions(regions)
 
             if progress_callback:
                 progress_callback(0.6, "Analyzing table structures...")

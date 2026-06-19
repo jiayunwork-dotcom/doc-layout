@@ -82,11 +82,29 @@ def get_task(task_id):
     result = task_manager.get_result(task_id)
     output_format = request.args.get("format", "json").lower()
 
+    min_confidence = request.args.get("min_confidence", None)
+    if min_confidence is not None:
+        try:
+            min_confidence = float(min_confidence)
+            if min_confidence < 0.0 or min_confidence > 1.0:
+                return jsonify({"error": "min_confidence must be between 0 and 1"}), 400
+        except ValueError:
+            return jsonify({"error": "min_confidence must be a number"}), 400
+
     response = task_info.model_dump()
 
     if result and task_info.status == TaskStatus.COMPLETED:
         if output_format == "json":
-            response["result"] = json.loads(task_manager.pipeline.export_result(result, "json"))
+            result_dict = json.loads(task_manager.pipeline.export_result(result, "json"))
+
+            if min_confidence is not None:
+                for page in result_dict.get("pages", []):
+                    page["regions"] = [
+                        r for r in page.get("regions", [])
+                        if r.get("confidence", 0) >= min_confidence
+                    ]
+
+            response["result"] = result_dict
         else:
             response["result"] = {
                 "format": output_format,
