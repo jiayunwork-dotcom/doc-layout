@@ -261,6 +261,8 @@ with st.sidebar:
         step=0.05,
         help="只显示置信度大于等于此阈值的区域"
     )
+    if "confidence_filter_info" in st.session_state:
+        st.info(st.session_state["confidence_filter_info"])
 
     st.divider()
     st.header("📋 任务列表")
@@ -395,6 +397,9 @@ with tab2:
                                 r for r in sorted_regions
                                 if r.get("confidence", 0) >= min_confidence
                             ]
+                            confidence_filtered_count = len(confidence_filtered_regions)
+
+                            st.session_state["confidence_filter_info"] = f"显示 {confidence_filtered_count}/{total_region_count} 个区域"
 
                             selected_region_id = st.session_state.get("selected_region_id")
                             annotated_image = draw_regions_on_image(
@@ -421,7 +426,7 @@ with tab2:
                             r for r in confidence_filtered_regions if r["type"] in type_filter
                         ]
 
-                        st.info(f"显示 {len(filtered_regions)}/{total_region_count} 个区域")
+                        st.info(f"当前列表 {len(filtered_regions)} 个区域")
 
                         for idx, region in enumerate(filtered_regions):
                             rtype = region["type"]

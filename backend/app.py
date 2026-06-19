@@ -124,6 +124,20 @@ def get_page(task_id, page_number):
     if not page_result:
         return jsonify({"error": f"Page {page_number} not found"}), 404
 
+    min_confidence = request.args.get("min_confidence", None)
+    if min_confidence is not None:
+        try:
+            min_confidence = float(min_confidence)
+            if min_confidence < 0.0 or min_confidence > 1.0:
+                return jsonify({"error": "min_confidence must be between 0 and 1"}), 400
+        except ValueError:
+            return jsonify({"error": "min_confidence must be a number"}), 400
+
+        page_result["regions"] = [
+            r for r in page_result.get("regions", [])
+            if r.get("confidence", 0) >= min_confidence
+        ]
+
     return jsonify(page_result)
 
 
