@@ -12,6 +12,7 @@ from schemas.models import (
     ComparisonResult,
     TaskBasicInfo,
     TaskStatus,
+    GlobalComparisonStats,
 )
 from core.comparison import compare_pages, calculate_stats
 from utils.file_utils import (
@@ -40,6 +41,7 @@ class ComparisonManager:
         self._initialized = True
 
         self.comparisons: Dict[str, ComparisonInfo] = {}
+        self.comparison_start_times: Dict[str, float] = {}
         self.results: Dict[str, ComparisonResult] = {}
         self.progress: Dict[str, float] = {}
         self.messages: Dict[str, str] = {}
@@ -76,7 +78,10 @@ class ComparisonManager:
             time.sleep(0.1)
 
     def _process_comparison(self, comparison_id: str):
+        import time
+        start_time = time.time()
         try:
+            self.comparison_start_times[comparison_id] = start_time
             self._update_status(comparison_id, ComparisonStatus.PROCESSING, 0.0, "Starting comparison...")
 
             comparison_info = self.comparisons.get(comparison_id)
@@ -179,20 +184,26 @@ class ComparisonManager:
             self.results[comparison_id] = result
             self._save_result(comparison_id, result)
 
-            self._update_status(comparison_id, ComparisonStatus.COMPLETED, 1.0, "Comparison complete")
+            end_time = time.time()
+            duration_ms = int((end_time - start_time) * 1000)
+            self._update_status(comparison_id, ComparisonStatus.COMPLETED, 1.0, "Comparison complete", duration_ms=duration_ms)
 
         except Exception as e:
-            self._update_status(comparison_id, ComparisonStatus.FAILED, 0.0, f"Error: {str(e)}")
+            end_time = time.time()
+            duration_ms = int((end_time - start_time) * 1000)
+            self._update_status(comparison_id, ComparisonStatus.FAILED, 0.0, f"Error: {str(e)}", duration_ms=duration_ms)
         finally:
             self.active_comparisons.discard(comparison_id)
 
-    def _update_status(self, comparison_id: str, status: ComparisonStatus, progress: float, message: str = None):
+    def _update_status(self, comparison_id: str, status: ComparisonStatus, progress: float, message: str = None, duration_ms: int = None):
         if comparison_id in self.comparisons:
             comp = self.comparisons[comparison_id]
             comp.status = status
             comp.progress = progress
             comp.message = message
             comp.updated_at = format_timestamp()
+            if duration_ms is not None:
+                comp.duration_ms = duration_ms
             self.comparisons[comparison_id] = comp
 
             self.progress[comparison_id] = progress
@@ -207,7 +218,7 @@ class ComparisonManager:
         except Exception:
             pass
 
-    def create_comparison(self, source_id: str, target_id: str, page_number: Optional[int] = None) -> str:
+    def create_comparison(self, source_id: str, target_id: str, page_number: Optional[int] = None, label: Optional[str] = None) -> str:
         if not self._task_manager:
             raise ValueError("TaskManager not set")
 
@@ -227,6 +238,7 @@ class ComparisonManager:
             source_id=source_id,
             target_id=target_id,
             page_number=page_number,
+            label=label,
             created_at=format_timestamp(),
             updated_at=format_timestamp(),
             progress=0.0,
@@ -254,5 +266,77 @@ class ComparisonManager:
                     pass
         return self.results.get(comparison_id)
 
-    def list_comparisons(self) -> List[ComparisonInfo]:
-        return list(self.comparisons.values())
+    def list_comparisons(
+        self,
+        page: int = 1,
+        page_size: int = 20,
+        source_id: Optional[str] = None,
+        target_id: Optional[str] = None,
+        label: Optional[str] = None,
+    ) -> tuple[List[ComparisonInfo], int]:
+        all_comps = list(self.comparisons.values())
+
+        all_comps.sort(key=lambda c: c.created_at, reverse=True)
+
+        filtered = []
+        for comp in all_comps:
+            if source_id and comp.source_id != source_id:
+                continue
+            if target_id and comp.target_id != target_id:
+                continue
+            if label and comp.label:
+                if label.lower() not in comp.label.lower():
+                    continue
+            if label and not comp.label:
+                continue
+            filtered.append(comp)
+
+        total = len(filtered)
+
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        paged = filtered[start_idx:end_idx]
+
+        return paged, total
+
+    def get_global_stats(self) -> GlobalComparisonStats:
+        stats = GlobalComparisonStats()
+
+        completed_comps = [c for c in self.comparisons.values() if c.status == ComparisonStatus.COMPLETED]
+        stats.total_comparisons = len(completed_comps)
+
+        if not completed_comps:
+            return stats
+
+        total_diffs = 0
+        type_counts = {"added": 0, "removed": 0, "moved": 0, "modified": 0, "unchanged": 0}
+        total_durations = 0
+        count_with_duration = 0
+
+        for comp in completed_comps:
+            result = self.get_result(comp.comparison_id)
+            if result:
+                total_diffs += result.stats.total
+                type_counts["added"] += result.stats.added
+                type_counts["removed"] += result.stats.removed
+                type_counts["moved"] += result.stats.moved
+                type_counts["modified"] += result.stats.modified
+                type_counts["unchanged"] += result.stats.unchanged
+
+            if comp.duration_ms is not None:
+                total_durations += comp.duration_ms
+                count_with_duration += 1
+
+        stats.avg_diff_count = round(total_diffs / len(completed_comps), 2) if completed_comps else 0.0
+        stats.avg_duration_ms = round(total_durations / count_with_duration, 2) if count_with_duration > 0 else 0.0
+
+        total_type_counts = sum(type_counts.values())
+        if total_type_counts > 0:
+            stats.type_distribution = {
+                k: round((v / total_type_counts) * 100, 2)
+                for k, v in type_counts.items()
+            }
+        else:
+            stats.type_distribution = {k: 0.0 for k in type_counts}
+
+        return stats

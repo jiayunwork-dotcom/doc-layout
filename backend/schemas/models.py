@@ -210,11 +210,20 @@ class ComparisonInfo(BaseModel):
     source_id: str
     target_id: str
     page_number: Optional[int] = None
+    label: Optional[str] = None
+    duration_ms: Optional[int] = None
     created_at: str
     updated_at: str
     progress: float = 0.0
     message: Optional[str] = None
     error: Optional[str] = None
+
+
+class GlobalComparisonStats(BaseModel):
+    total_comparisons: int = 0
+    avg_diff_count: float = 0.0
+    type_distribution: Dict[str, float] = Field(default_factory=dict)
+    avg_duration_ms: float = 0.0
 
 
 class ComparisonResult(BaseModel):

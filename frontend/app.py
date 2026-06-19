@@ -113,10 +113,12 @@ def delete_task(task_id):
         return False
 
 
-def create_comparison(source_id, target_id, page_number=None):
+def create_comparison(source_id, target_id, page_number=None, label=None):
     payload = {"source_id": source_id, "target_id": target_id}
     if page_number is not None:
         payload["page_number"] = page_number
+    if label is not None and label.strip():
+        payload["label"] = label.strip()
     try:
         response = requests.post(f"{API_URL}/compare", json=payload, timeout=30)
         return response.json() if response.status_code == 202 else None
@@ -133,10 +135,38 @@ def get_comparison_status(comparison_id):
         return None
 
 
-def list_comparisons():
+def list_comparisons(page=1, page_size=10, source_id=None, target_id=None, label=None):
+    params = {"page": page, "page_size": page_size}
+    if source_id:
+        params["source_id"] = source_id
+    if target_id:
+        params["target_id"] = target_id
+    if label:
+        params["label"] = label
     try:
-        response = requests.get(f"{API_URL}/comparisons", timeout=10)
+        response = requests.get(f"{API_URL}/comparisons", params=params, timeout=10)
         return response.json() if response.status_code == 200 else None
+    except:
+        return None
+
+
+def get_comparison_stats():
+    try:
+        response = requests.get(f"{API_URL}/comparisons/stats", timeout=10)
+        return response.json() if response.status_code == 200 else None
+    except:
+        return None
+
+
+def get_heatmap_image(comparison_id, page_number):
+    try:
+        response = requests.get(
+            f"{API_URL}/comparisons/{comparison_id}/heatmap",
+            params={"page": page_number},
+            timeout=30
+        )
+        if response.status_code == 200:
+            return Image.open(BytesIO(response.content))
     except:
         return None
 
@@ -447,6 +477,29 @@ with st.sidebar:
         st.info(st.session_state["confidence_filter_info"])
 
     st.divider()
+    st.header("📊 比对统计")
+    comp_stats = get_comparison_stats()
+    if comp_stats:
+        stat_col1, stat_col2 = st.columns(2)
+        with stat_col1:
+            st.metric("总比对次数", comp_stats.get("total_comparisons", 0))
+        with stat_col2:
+            avg_ms = comp_stats.get("avg_duration_ms", 0)
+            if avg_ms >= 1000:
+                st.metric("平均耗时", f"{avg_ms/1000:.1f}s")
+            else:
+                st.metric("平均耗时", f"{avg_ms:.0f}ms")
+
+        st.metric("平均差异数", comp_stats.get("avg_diff_count", 0))
+
+        type_dist = comp_stats.get("type_distribution", {})
+        if type_dist:
+            with st.expander("📈 差异类型分布"):
+                for dtype, pct in type_dist.items():
+                    name = DIFF_TYPE_NAMES.get(dtype, dtype)
+                    st.write(f"**{name}**: {pct}%")
+
+    st.divider()
     st.header("📋 任务列表")
 
     tasks_data = list_tasks()
@@ -696,6 +749,83 @@ with tab3:
 
     st.divider()
 
+    st.markdown("### 📜 历史比对记录")
+    hist_col1, hist_col2 = st.columns([4, 1])
+    with hist_col1:
+        pass
+    with hist_col2:
+        refresh_history = st.button("🔄 刷新", key="refresh_history_btn")
+
+    history_data = list_comparisons(page=1, page_size=10)
+    if history_data and history_data.get("comparisons"):
+        history_items = history_data["comparisons"]
+        st.info(f"共 {history_data['total']} 条比对记录，显示最近 {len(history_items)} 条")
+
+        history_cols = st.columns(2)
+        for idx, comp in enumerate(history_items):
+            col_idx = idx % 2
+            with history_cols[col_idx]:
+                comp_id = comp["comparison_id"]
+                status = comp["status"]
+                label = comp.get("label") or "(无标签)"
+                source_id = comp["source_id"]
+                target_id = comp["target_id"]
+
+                source_task_data = get_task_status(source_id)
+                target_task_data = get_task_status(target_id)
+                source_name = source_task_data.get("metadata", {}).get("filename", source_id[:8]) if source_task_data else source_id[:8]
+                target_name = target_task_data.get("metadata", {}).get("filename", target_id[:8]) if target_task_data else target_id[:8]
+
+                status_emoji = {
+                    "pending": "⏳",
+                    "processing": "⚙️",
+                    "completed": "✅",
+                    "failed": "❌",
+                }.get(status, "❓")
+
+                stats_summary = ""
+                comp_result = None
+                if status == "completed":
+                    comp_detail = get_comparison_status(comp_id)
+                    if comp_detail and comp_detail.get("result"):
+                        s = comp_detail["result"].get("stats", {})
+                        comp_result = comp_detail["result"]
+                        diff_total = s.get("added", 0) + s.get("removed", 0) + s.get("moved", 0) + s.get("modified", 0)
+                        stats_summary = f"➕{s.get('added', 0)} ➖{s.get('removed', 0)} 🔀{s.get('moved', 0)} ✏️{s.get('modified', 0)} | 差异: {diff_total}"
+
+                duration_text = ""
+                if comp.get("duration_ms") is not None:
+                    dm = comp["duration_ms"]
+                    duration_text = f"⏱️ {dm/1000:.1f}s" if dm >= 1000 else f"⏱️ {dm}ms"
+
+                card_label = f"{status_emoji} {label}"
+                if st.button(
+                    f"{card_label}",
+                    key=f"hist_card_{comp_id}",
+                    use_container_width=True,
+                    type="primary" if st.session_state.get("current_comparison_id") == comp_id else "secondary"
+                ):
+                    st.session_state["current_comparison_id"] = comp_id
+                    if comp_result and status == "completed":
+                        st.session_state["_cached_comp_result"] = comp_result
+                    st.rerun()
+
+                with st.container():
+                    st.markdown(
+                        f"<div style='padding:8px 12px;border:1px solid #e0e0e0;border-radius:8px;margin-top:-8px;"
+                        f"background-color:#fafafa;font-size:13px'>"
+                        f"<div><strong>📄 源:</strong> {source_name}</div>"
+                        f"<div><strong>📄 目标:</strong> {target_name}</div>"
+                        f"<div>{stats_summary}</div>"
+                        f"<div style='color:#666;margin-top:4px'>{duration_text} | {comp.get('created_at', '')[:19]}</div>"
+                        f"</div>",
+                        unsafe_allow_html=True
+                    )
+    else:
+        st.info("暂无历史比对记录")
+
+    st.divider()
+
     completed_tasks = []
     tasks_data = list_tasks()
     if tasks_data and tasks_data.get("tasks"):
@@ -745,35 +875,13 @@ with tab3:
             else:
                 page_number = None
 
-        with st.sidebar:
-            st.divider()
-            st.header("📊 比对任务列表")
-            comp_data = list_comparisons()
-            if comp_data and comp_data.get("comparisons"):
-                comps = comp_data["comparisons"]
-                st.info(f"共 {comp_data['total']} 个比对任务")
-
-                for comp in reversed(comps[-10:]):
-                    status_emoji = {
-                        "pending": "⏳",
-                        "processing": "⚙️",
-                        "completed": "✅",
-                        "failed": "❌",
-                    }.get(comp["status"], "❓")
-
-                    with st.expander(f"{status_emoji} {comp['comparison_id'][:8]}..."):
-                        st.write(f"**状态**: {comp['status']}")
-                        st.write(f"**源**: {comp['source_id'][:8]}...")
-                        st.write(f"**目标**: {comp['target_id'][:8]}...")
-                        st.write(f"**进度**: {comp['progress']*100:.0f}%")
-                        if comp.get("message"):
-                            st.caption(comp["message"])
-                        st.write(f"**创建时间**: {comp['created_at']}")
-
-                        if st.button("查看", key=f"view_comp_{comp['comparison_id']}"):
-                            st.session_state["current_comparison_id"] = comp["comparison_id"]
-            else:
-                st.info("暂无比对任务")
+        label_col1, label_col2 = st.columns([3, 1])
+        with label_col1:
+            comp_label = st.text_input(
+                "比对标签（可选）",
+                placeholder="输入自定义标签，方便后续检索",
+                key="comp_label_input"
+            )
 
         compare_btn = st.button(
             "🚀 开始比对",
@@ -787,10 +895,12 @@ with tab3:
 
         if compare_btn and source_id != target_id:
             with st.status("正在创建比对任务...", expanded=True) as status:
-                result = create_comparison(source_id, target_id, page_number)
+                result = create_comparison(source_id, target_id, page_number, comp_label)
                 if result and result.get("comparison_id"):
                     comparison_id = result["comparison_id"]
                     st.session_state["current_comparison_id"] = comparison_id
+                    if "_cached_comp_result" in st.session_state:
+                        del st.session_state["_cached_comp_result"]
                     status.update(label=f"✅ 比对任务已创建: {comparison_id}", state="complete")
                     st.success(result["message"])
                     st.rerun()
@@ -802,7 +912,7 @@ with tab3:
             comparison_id = st.text_input(
                 "或输入比对ID",
                 value="",
-                placeholder="输入比对ID或从侧边栏选择"
+                placeholder="输入比对ID、从侧边栏选择或点击上方历史记录"
             )
 
         if comparison_id:
@@ -818,6 +928,15 @@ with tab3:
                 progress_bar = st.progress(progress)
                 if comp_data.get("message"):
                     st.caption(comp_data["message"])
+
+                if comp_data.get("label"):
+                    st.info(f"🏷️ 标签: {comp_data['label']}")
+                if comp_data.get("duration_ms") is not None:
+                    dm = comp_data["duration_ms"]
+                    if dm >= 1000:
+                        st.info(f"⏱️ 比对耗时: {dm/1000:.1f}秒")
+                    else:
+                        st.info(f"⏱️ 比对耗时: {dm}毫秒")
 
                 if status == "pending":
                     st.info("比对任务排队中，请等待...")
@@ -859,8 +978,8 @@ with tab3:
                         total_pages = len(page_diffs)
                         page_num = st.slider("选择页码", 1, total_pages, 1, key="compare_page_slider")
 
-                        page_diff = page_diffs[page_num - 1]
-                        diffs = page_diff.get("diffs", [])
+                        show_heatmap = st.toggle("🔥 热力图模式", value=False, key="heatmap_toggle",
+                                                  help="显示变更热力图，颜色越深表示差异越集中")
 
                         show_unchanged = not st.toggle("仅显示差异区域", value=False, key="show_diff_only")
 
@@ -871,37 +990,49 @@ with tab3:
                             format_func=lambda x: DIFF_TYPE_NAMES.get(x, x)
                         )
 
+                        page_diff = page_diffs[page_num - 1]
+                        diffs = page_diff.get("diffs", [])
                         filtered_diffs = [d for d in diffs if d["type"] in diff_type_filter]
 
-                        source_image = get_page_image(source_id, page_num)
-                        target_image = get_page_image(target_id, page_num)
+                        if show_heatmap:
+                            st.markdown(f"### 🔥 变更热力图 - 第 {page_num} 页")
+                            st.caption("颜色越深表示该区域差异越集中（透明→黄→橙→红）")
 
-                        if source_image and target_image:
-                            source_annotated = draw_diff_regions_on_image(
-                                source_image, filtered_diffs, side="source", show_unchanged=show_unchanged
-                            )
-                            target_annotated = draw_diff_regions_on_image(
-                                target_image, filtered_diffs, side="target", show_unchanged=show_unchanged
-                            )
+                            heatmap = get_heatmap_image(comparison_id, page_num)
+                            if heatmap:
+                                st.image(heatmap, use_container_width=True, caption=f"热力图 (叠加50%透明度)")
+                            else:
+                                st.error("热力图生成失败")
+                        else:
+                            source_image = get_page_image(source_id, page_num)
+                            target_image = get_page_image(target_id, page_num)
 
-                            img_col1, img_col2 = st.columns(2)
-                            with img_col1:
-                                st.markdown(f"**源版本 (Source)** - 第 {page_num} 页")
-                                st.caption(f"红色框=删除区域, 黄色框=移动区域")
-                                st.image(source_annotated, use_container_width=True)
+                            if source_image and target_image:
+                                source_annotated = draw_diff_regions_on_image(
+                                    source_image, filtered_diffs, side="source", show_unchanged=show_unchanged
+                                )
+                                target_annotated = draw_diff_regions_on_image(
+                                    target_image, filtered_diffs, side="target", show_unchanged=show_unchanged
+                                )
 
-                            with img_col2:
-                                st.markdown(f"**目标版本 (Target)** - 第 {page_num} 页")
-                                st.caption(f"绿色框=新增区域, 黄色框=移动区域")
-                                st.image(target_annotated, use_container_width=True)
+                                img_col1, img_col2 = st.columns(2)
+                                with img_col1:
+                                    st.markdown(f"**源版本 (Source)** - 第 {page_num} 页")
+                                    st.caption(f"红色框=删除区域, 黄色框=移动区域")
+                                    st.image(source_annotated, use_container_width=True)
 
-                            if any(d["type"] == "moved" for d in filtered_diffs):
-                                st.divider()
-                                st.markdown("### 🔄 移动区域连接示意")
-                                st.caption("虚线连接移动区域的旧位置和新位置")
-                                moved_diffs = [d for d in filtered_diffs if d["type"] == "moved"]
-                                combined_img = draw_moved_connections(source_image, target_image, moved_diffs)
-                                st.image(combined_img, use_container_width=True)
+                                with img_col2:
+                                    st.markdown(f"**目标版本 (Target)** - 第 {page_num} 页")
+                                    st.caption(f"绿色框=新增区域, 黄色框=移动区域")
+                                    st.image(target_annotated, use_container_width=True)
+
+                                if any(d["type"] == "moved" for d in filtered_diffs):
+                                    st.divider()
+                                    st.markdown("### 🔄 移动区域连接示意")
+                                    st.caption("虚线连接移动区域的旧位置和新位置")
+                                    moved_diffs = [d for d in filtered_diffs if d["type"] == "moved"]
+                                    combined_img = draw_moved_connections(source_image, target_image, moved_diffs)
+                                    st.image(combined_img, use_container_width=True)
 
                         st.divider()
                         st.markdown("### 📋 差异详情列表")
@@ -1030,9 +1161,11 @@ with tab4:
     - `DELETE /tasks/{id}` - 删除任务
 
     **版面比对接口:**
-    - `POST /compare` - 创建比对任务（异步），请求体: `{source_id, target_id, page_number?}`
-    - `GET /comparisons` - 列出所有比对任务
+    - `POST /compare` - 创建比对任务（异步），请求体: `{source_id, target_id, page_number?, label?}`
+    - `GET /comparisons?page=&page_size=&source_id=&target_id=&label=` - 列出比对任务（支持分页、过滤、标签搜索）
+    - `GET /comparisons/stats` - 获取全局比对聚合统计
     - `GET /comparisons/{id}` - 查询比对状态和结果
+    - `GET /comparisons/{id}/heatmap?page=` - 获取指定页面的变更热力图PNG
     - `GET /comparisons/{id}/export` - 导出结构化差异报告（JSON）
 
     ---
@@ -1043,6 +1176,9 @@ with tab4:
     2. **多栏文档**: XY-Cut算法会自动处理双栏、三栏布局
     3. **表格识别**: 点击表格区域可查看结构化的表格内容
     4. **阅读顺序**: 区域上标注的数字即为阅读顺序
+    5. **历史比对**: 在版面比对标签页可查看最近10条比对记录，点击直接加载
+    6. **热力图**: 切换热力图模式可直观查看页面差异集中区域
+    7. **比对标签**: 创建比对时可添加自定义标签，方便后续检索和分类
 
     ---
 
@@ -1073,4 +1209,25 @@ with tab4:
             )
 
     st.divider()
-    st.caption("版本: 1.0.0 | 基于 Flask + Streamlit + ONNX Runtime")
+    st.markdown("**🔥 热力图颜色说明:**")
+    heatmap_colors = [
+        ("透明", "无差异"),
+        ("黄色", "差异较少"),
+        ("橙色", "差异中等"),
+        ("红色", "差异集中"),
+    ]
+    heatmap_color_cols = st.columns(4)
+    heatmap_hex = ["#ffffff", "#ffff00", "#ffa500", "#ff4500"]
+    for i, (name, desc) in enumerate(heatmap_colors):
+        with heatmap_color_cols[i]:
+            border = "1px solid #ccc" if i == 0 else "none"
+            color = heatmap_hex[i]
+            st.markdown(
+                f"<div style='background-color:{color};padding:10px;border-radius:5px;color:{"black" if i < 2 else "white"};"
+                f"border:{border}'>"
+                f"<strong>{name}</strong><br><span style='font-size:12px'>{desc}</span></div>",
+                unsafe_allow_html=True
+            )
+
+    st.divider()
+    st.caption("版本: 1.1.0 | 基于 Flask + Streamlit + ONNX Runtime")

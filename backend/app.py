@@ -6,6 +6,7 @@ from flask import Flask, request, jsonify, send_file, abort
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
 import json
+from io import BytesIO
 
 from config import Config
 from core.task_manager import TaskManager
@@ -216,6 +217,7 @@ def create_comparison():
     source_id = data.get("source_id")
     target_id = data.get("target_id")
     page_number = data.get("page_number")
+    label = data.get("label")
 
     if not source_id or not target_id:
         return jsonify({"error": "source_id and target_id are required"}), 400
@@ -233,6 +235,7 @@ def create_comparison():
             source_id=source_id,
             target_id=target_id,
             page_number=page_number,
+            label=label,
         )
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -247,11 +250,44 @@ def create_comparison():
 
 @app.route("/comparisons", methods=["GET"])
 def list_comparisons():
-    comparisons = comparison_manager.list_comparisons()
+    try:
+        page = int(request.args.get("page", 1))
+        if page < 1:
+            page = 1
+    except (ValueError, TypeError):
+        page = 1
+
+    try:
+        page_size = int(request.args.get("page_size", 20))
+        if page_size < 1:
+            page_size = 20
+    except (ValueError, TypeError):
+        page_size = 20
+
+    source_id = request.args.get("source_id")
+    target_id = request.args.get("target_id")
+    label = request.args.get("label")
+
+    comparisons, total = comparison_manager.list_comparisons(
+        page=page,
+        page_size=page_size,
+        source_id=source_id,
+        target_id=target_id,
+        label=label,
+    )
+
     return jsonify({
         "comparisons": [c.model_dump() for c in comparisons],
-        "total": len(comparisons),
+        "total": total,
+        "page": page,
+        "page_size": page_size,
     })
+
+
+@app.route("/comparisons/stats", methods=["GET"])
+def get_comparison_stats():
+    stats = comparison_manager.get_global_stats()
+    return jsonify(stats.model_dump())
 
 
 @app.route("/comparisons/<comparison_id>", methods=["GET"])
@@ -279,6 +315,65 @@ def get_comparison(comparison_id):
         response["result"] = result_dict
 
     return jsonify(response)
+
+
+@app.route("/comparisons/<comparison_id>/heatmap", methods=["GET"])
+def get_comparison_heatmap(comparison_id):
+    from PIL import Image
+    from utils.heatmap_utils import generate_heatmap_image, heatmap_to_png_bytes
+    from utils.file_utils import get_page_image_path
+
+    comparison_info = comparison_manager.get_comparison(comparison_id)
+    if not comparison_info:
+        return jsonify({"error": f"Comparison {comparison_id} not found"}), 404
+
+    if comparison_info.status != ComparisonStatus.COMPLETED:
+        return jsonify({
+            "error": f"Comparison not yet completed. Current status: {comparison_info.status}"
+        }), 400
+
+    result = comparison_manager.get_result(comparison_id)
+    if not result:
+        return jsonify({"error": "Comparison result not found"}), 404
+
+    try:
+        page_num = int(request.args.get("page", 1))
+        if page_num < 1:
+            page_num = 1
+    except (ValueError, TypeError):
+        page_num = 1
+
+    page_diffs = result.page_diffs
+    if page_num > len(page_diffs):
+        return jsonify({"error": f"Page {page_num} not found. Total pages: {len(page_diffs)}"}), 404
+
+    page_diff = page_diffs[page_num - 1]
+
+    source_id = comparison_info.source_id
+    image_path = get_page_image_path(source_id, page_num)
+    if not os.path.exists(image_path):
+        target_id = comparison_info.target_id
+        image_path = get_page_image_path(target_id, page_num)
+        if not os.path.exists(image_path):
+            return jsonify({"error": f"Base image for page {page_num} not found"}), 404
+
+    try:
+        base_image = Image.open(image_path)
+    except Exception as e:
+        return jsonify({"error": f"Failed to load base image: {str(e)}"}), 500
+
+    try:
+        heatmap_image = generate_heatmap_image(page_diff, base_image, alpha=0.5)
+        png_bytes = heatmap_to_png_bytes(heatmap_image)
+    except Exception as e:
+        return jsonify({"error": f"Failed to generate heatmap: {str(e)}"}), 500
+
+    return send_file(
+        BytesIO(png_bytes),
+        mimetype="image/png",
+        as_attachment=False,
+        download_name=f"heatmap_{comparison_id[:8]}_p{page_num}.png"
+    )
 
 
 @app.route("/comparisons/<comparison_id>/export", methods=["GET"])
