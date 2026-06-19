@@ -243,6 +243,8 @@ class TaskManager:
         return list(self.tasks.values())
 
     def delete_task(self, task_id: str) -> bool:
+        exists = task_id in self.tasks or task_id in self.results
+
         if task_id in self.tasks:
             del self.tasks[task_id]
         if task_id in self.results:
@@ -252,8 +254,15 @@ class TaskManager:
         if task_id in self.messages:
             del self.messages[task_id]
 
+        from config import Config
+        import os
+        upload_dir = os.path.join(Config.UPLOAD_FOLDER, task_id)
+        result_dir = os.path.join(Config.RESULTS_FOLDER, task_id)
+        data_exists = os.path.exists(upload_dir) or os.path.exists(result_dir)
+
         delete_task_data(task_id)
-        return True
+
+        return exists or data_exists
 
     def get_all_tasks(self) -> List[TaskInfo]:
         return list(self.tasks.values())

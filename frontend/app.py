@@ -114,9 +114,27 @@ def delete_task(task_id):
 
 
 def draw_regions_on_image(image, regions, selected_region_id=None, page_width=None, page_height=None):
-    img = image.copy()
-    img_array = np.array(img)
-    h, w = img_array.shape[:2]
+    from PIL import ImageDraw, ImageFont
+    import math
+
+    img = image.copy().convert("RGBA")
+    w, h = img.size
+
+    overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    try:
+        font = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 14)
+    except:
+        try:
+            font = ImageFont.truetype("DejaVuSans.ttf", 14)
+        except:
+            font = ImageFont.load_default()
+
+    try:
+        font_bold = ImageFont.truetype("/System/Library/Fonts/PingFang.ttc", 14)
+    except:
+        font_bold = font
 
     for region in regions:
         bbox = region["bbox"]
@@ -129,30 +147,39 @@ def draw_regions_on_image(image, regions, selected_region_id=None, page_width=No
         y2 = int((bbox["y"] + bbox["height"]) * h)
 
         is_selected = selected_region_id and region["id"] == selected_region_id
+        alpha = 100 if not is_selected else 160
 
-        overlay = img_array.copy()
-        alpha = 0.3 if not is_selected else 0.6
-        cv2_color = (color[2], color[1], color[0])
-        import cv2
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), cv2_color, -1)
-        img_array = cv2.addWeighted(overlay, alpha, img_array, 1 - alpha, 0)
+        fill_color = (color[0], color[1], color[2], alpha)
+        draw.rectangle([x1, y1, x2, y2], fill=fill_color)
 
-        thickness = 4 if is_selected else 2
-        cv2.rectangle(img_array, (x1, y1), (x2, y2), cv2_color, thickness)
+        line_width = 4 if is_selected else 2
+        outline_color = (color[0], color[1], color[2], 255)
+        draw.rectangle([x1, y1, x2, y2], outline=outline_color, width=line_width)
 
         label = REGION_NAMES.get(rtype, rtype)
         if region.get("reading_order"):
             label = f"{label} #{region['reading_order']}"
 
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.5
-        font_thickness = 2
-        (text_w, text_h), _ = cv2.getTextSize(label, font, font_scale, font_thickness)
+        try:
+            text_bbox = draw.textbbox((0, 0), label, font=font)
+            text_w = text_bbox[2] - text_bbox[0]
+            text_h = text_bbox[3] - text_bbox[1]
+        except:
+            text_w, text_h = len(label) * 8, 16
 
-        cv2.rectangle(img_array, (x1, y1 - text_h - 10), (x1 + text_w + 10, y1), cv2_color, -1)
-        cv2.putText(img_array, label, (x1 + 5, y1 - 5), font, font_scale, (255, 255, 255), font_thickness)
+        label_y = y1 - text_h - 10
+        if label_y < 0:
+            label_y = y1 + 5
 
-    return Image.fromarray(img_array)
+        draw.rectangle(
+            [x1, label_y, x1 + text_w + 10, label_y + text_h + 8],
+            fill=outline_color
+        )
+
+        draw.text((x1 + 5, label_y + 3), label, fill=(255, 255, 255, 255), font=font)
+
+    result = Image.alpha_composite(img, overlay)
+    return result.convert("RGB")
 
 
 def display_region_details(region, page_image=None):
